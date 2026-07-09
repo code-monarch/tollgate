@@ -44,7 +44,7 @@ tollgate/
 
 ## Status
 
-Spec agreed. **Milestones 1–3 are implemented in Go.**
+Spec agreed. **Milestones 1–4 are implemented in Go.**
 
 - **M1 — the wedge**: a minimal facilitator (quote → verify → settle), an append-only
   double-entry ledger with derived balances (in-memory + Postgres), and a `net/http`
@@ -59,6 +59,10 @@ Spec agreed. **Milestones 1–3 are implemented in Go.**
   (text/category/price/reputation), **reputation** scoring from SLA + dispute rate, and
   an **MCP server** (`search_services`, `get_service`, `call_service`) so agents discover
   and pay for services the way they use tools. `call_service` runs the full x402 flow.
+- **M4 — buyer wallet + policy engine** (the buyer-side moat): a custodial **buyer plane**
+  (agents, wallets, funding) and a deterministic, deny-by-default **policy engine** — amount
+  ceilings, task/rolling budgets, allow/blocklists, velocity, price-spike anomaly, and
+  human-approval. `/authorize` gates every payment; `/pay` signs + settles only if allowed.
 
 ## Build & run (Milestone 1)
 
@@ -70,6 +74,7 @@ go run ./cmd/demo      # prints the full 402 dance in one process
 go run ./cmd/facilitator   # standalone facilitator on :8080 (in-memory ledger)
 go run ./cmd/marketplace       # marketplace HTTP API on :8081
 go run ./cmd/marketplace -mcp  # marketplace as an MCP server over stdio
+go run ./cmd/buyer             # buyer plane (wallets + policy engine) on :8082
 
 # Postgres-backed ledger: point the facilitator at a DB with db/schema.sql applied
 DATABASE_URL=postgres://user:pass@host:5432/db go run ./cmd/facilitator
@@ -97,11 +102,14 @@ internal/rail/bitnob/  # ... and the real Bitnob rail (HMAC-signed /api/withdraw
 internal/receipt/      # signed, verifiable transaction receipts
 internal/registry/     # marketplace catalog: service entries, search, reputation
 internal/marketplace/  # marketplace HTTP API + MCP server (+ buyer-driven call_service)
+internal/policy/       # buyer-side moat: policy engine, rule types, tracker, approvals
+internal/buyerplane/   # custodial buyer plane: agents/wallets/policies + authorize/pay
 internal/money/        # integer minor-units Money (never a float)
 internal/buyer/        # minimal buyer client for the demo/tests
 cmd/demo/              # end-to-end walkthrough
 cmd/facilitator/       # standalone facilitator server
 cmd/marketplace/       # marketplace server (HTTP, or -mcp for stdio MCP)
+cmd/buyer/             # buyer-plane server (wallets + policy engine)
 db/schema.sql          # Postgres ledger schema (target for the Postgres Store)
 ```
 

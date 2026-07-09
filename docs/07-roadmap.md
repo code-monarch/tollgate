@@ -74,11 +74,22 @@ Verified end to end: an agent discovers a service via the MCP `call_service` too
 x402 flow pays the seller through the ledger, and the result + receipt return to the
 caller (`internal/marketplace` e2e test).
 
-## Milestone 4 — Buyer wallet + policy engine
+## Milestone 4 — Buyer wallet + policy engine ✅
 
-- Agent identity + wallet + funding.
-- Policy engine (all rule types from `05-policy-engine.md`), `/authorize` + `/pay`.
-- Human-approval webhook flow.
+- [x] Agent identity + wallet + funding — custodial buyer plane mints keypairs, registers
+      agents with the facilitator, funds and reads derived balances (`internal/buyerplane`).
+- [x] Policy engine — all rule types from `05-policy-engine.md` (amount_ceiling, budget by
+      task/rolling-window, allow/blocklist with host globs, velocity, anomaly/price-spike,
+      approval), deny-by-default, most-restrictive-wins, versioned policies, deterministic
+      (`internal/policy`).
+- [x] `/authorize` (decision only) + `/pay` (authorize → sign with the custodied key →
+      settle through the seller → record spend). No policy ⇒ deny.
+- [x] Human-approval webhook flow — needs_approval parks a request, fires the webhook, and
+      is unlocked by resolve; on_timeout posture enforced (`approval.go`).
+
+Verified end to end: a policy denies an over-ceiling or budget-exhausted payment (no charge),
+allows within-limits calls (seller paid via the ledger), and gates a high-value call through
+needs_approval → resolve → pay (`internal/buyerplane` tests).
 
 ## Milestone 5 — Analytics + dynamic pricing
 

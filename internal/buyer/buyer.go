@@ -24,6 +24,33 @@ type Client struct {
 	HC                *http.Client
 }
 
+// Pay signs the given quote with the agent key and sends the paid request to the
+// quote's resource, returning the seller's response. Use this to pay a quote you
+// already hold (e.g. from a prior 402) rather than re-discovering it.
+func (c *Client) Pay(quote x402.Quote) (*http.Response, error) {
+	hc := c.HC
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	if c.FacilitatorPubKey != nil {
+		if err := x402.VerifyQuote(c.FacilitatorPubKey, quote); err != nil {
+			return nil, fmt.Errorf("buyer: refusing to pay unverified quote: %w", err)
+		}
+	}
+	p := x402.Payment{QuoteID: quote.QuoteID, Nonce: quote.Nonce, AgentID: c.AgentID, PayFrom: c.Wallet}
+	x402.SignPayment(c.PrivateKey, &p)
+	header, err := x402.EncodePayment(p)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodGet, quote.Resource, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Payment", header)
+	return hc.Do(req)
+}
+
 // Get fetches url, transparently handling a single 402 challenge.
 func (c *Client) Get(url string) (*http.Response, error) {
 	hc := c.HC
