@@ -19,6 +19,8 @@ import (
 
 	"github.com/tollgate/tollgate/internal/facilitator"
 	"github.com/tollgate/tollgate/internal/ledger"
+	"github.com/tollgate/tollgate/internal/rail"
+	"github.com/tollgate/tollgate/internal/rail/bitnob"
 	"github.com/tollgate/tollgate/internal/settlement"
 	"github.com/tollgate/tollgate/x402"
 )
@@ -39,7 +41,8 @@ func main() {
 	}
 
 	store, storeKind := openStore()
-	core := facilitator.NewCore(store, signer, settlement.Mock{})
+	stableRail, railKind := openRail()
+	core := facilitator.NewCore(store, signer, settlement.Mock{}, facilitator.WithRail(stableRail))
 	core.RegisterService(facilitator.Service{
 		ID: "svc_geocoder", SellerWallet: "wallet:seller_geocoder", Currency: "USDC",
 		Network: "base", Asset: "USDC", PayTo: "0xSELLER",
@@ -53,11 +56,23 @@ func main() {
 		log.Fatal(err)
 	}
 
-	srv := facilitator.NewServer(core)
-	log.Printf("tollgate facilitator listening on %s (mock settlement, %s ledger)", addr, storeKind)
+	srv := facilitator.NewServer(core).WithWebhookSecret(os.Getenv("BITNOB_WEBHOOK_SECRET"))
+	log.Printf("tollgate facilitator on %s (%s ledger, %s payout rail)", addr, storeKind, railKind)
 	if err := http.ListenAndServe(addr, srv.Routes()); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// openRail returns the Bitnob stablecoin rail when BITNOB_CLIENT_ID and
+// BITNOB_SECRET are set, otherwise a mock rail. BITNOB_BASE_URL overrides the
+// default production host.
+func openRail() (rail.Rail, string) {
+	clientID := os.Getenv("BITNOB_CLIENT_ID")
+	secret := os.Getenv("BITNOB_SECRET")
+	if clientID == "" || secret == "" {
+		return rail.NewMock(), "mock"
+	}
+	return bitnob.New(os.Getenv("BITNOB_BASE_URL"), clientID, secret), "bitnob"
 }
 
 // openStore returns a Postgres-backed ledger when DATABASE_URL is set (schema

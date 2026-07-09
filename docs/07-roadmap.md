@@ -36,11 +36,29 @@ Verified by `cmd/demo` and `internal/facilitator` end-to-end tests (in-process a
 plus a Postgres store integration test (`scripts/pgtest.ps1`) covering idempotency under
 concurrent writes.
 
-## Milestone 2 — Real settlement + escrow
+## Milestone 2 — Real settlement + escrow ✅
 
-- Wire a real stablecoin rail (USDC on Base) behind the `Settlement` interface.
-- Escrow-with-verification path for agent-to-agent (`release` / `refund`).
-- Receipts (signed, both parties).
+- [x] Real stablecoin rail wired behind a `rail.Rail` interface — **Bitnob**
+      (`POST /api/withdrawals`, HMAC-SHA256 request signing) with a mock fallback
+      (`internal/rail`, `internal/rail/bitnob`).
+- [x] Escrow-with-verification for agent-to-agent: `settle(escrow)` holds funds in
+      an escrow account; `release` pays the seller, `refund` returns to the buyer.
+      Both idempotent (`internal/facilitator/escrow.go`).
+- [x] Receipts — signed (facilitator ed25519) for both buyer and seller, verifiable
+      and retrievable (`internal/receipt`, `GET /v1/receipts/{tx}`).
+- [x] Payout + async webhook finalization: `POST /v1/payouts` reserves funds and
+      sends over the rail; `POST /v1/webhooks/bitnob` (HMAC-verified) settles or
+      reverses on `transfer.success`/`transfer.failed`.
+
+**Design note — where money touches the chain.** Per-call buyer→seller settlement
+is **custodial and internal**: the double-entry ledger *is* the settlement. On-chain
+per-call transfer is a non-starter for $0.001 micro-payments (gas ≫ payment). The
+real stablecoin rail (Bitnob) is used at the edges — **payouts** (a seller withdraws
+an accrued internal balance to a stablecoin address) and, later, funding deposits.
+This keeps the hot path sub-second and cheap while still settling in real stablecoin.
+
+The Bitnob client is written to the documented contract and tested against a mock
+server; moving real funds needs live credentials + a sandbox run.
 
 ## Milestone 3 — Marketplace / discovery
 

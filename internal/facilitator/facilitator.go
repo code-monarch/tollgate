@@ -15,8 +15,19 @@ import (
 
 	"github.com/tollgate/tollgate/internal/ledger"
 	"github.com/tollgate/tollgate/internal/money"
+	"github.com/tollgate/tollgate/internal/rail"
+	"github.com/tollgate/tollgate/internal/receipt"
 	"github.com/tollgate/tollgate/internal/settlement"
 	"github.com/tollgate/tollgate/x402"
+)
+
+// Internal ledger accounts. Balances across all accounts always net to zero, so
+// these contra-accounts keep the double-entry invariant intact as money enters
+// (treasury), is held mid-transaction (escrow), or leaves the platform (external).
+const (
+	walletTreasury = "wallet:treasury" // source of funded deposits
+	walletEscrow   = "wallet:escrow"   // holds escrowed funds mid-transaction
+	walletExternal = "wallet:external" // sink for funds paid out over a real rail
 )
 
 // Service is a registered sellable endpoint. Milestone 1 keeps the registry
@@ -43,11 +54,16 @@ type Core struct {
 	store    ledger.Store
 	signer   *x402.Signer
 	settler  settlement.Settlement
+	rail     rail.Rail
+	receipts *receipt.Store
 	services map[string]Service
 	agents   map[string]Agent
 	quotes   map[string]x402.Quote
-	nonces   map[string]bool // nonce -> consumed
+	nonces   map[string]bool          // nonce -> consumed
+	escrows  map[string]*EscrowRecord // transaction id -> escrow
+	payouts  map[string]*PayoutRecord // reference -> payout
 	ttl      time.Duration
+	dispute  time.Duration
 	now      func() time.Time
 }
 
@@ -60,17 +76,30 @@ func WithTTL(d time.Duration) Option { return func(c *Core) { c.ttl = d } }
 // WithClock overrides the time source (tests).
 func WithClock(now func() time.Time) Option { return func(c *Core) { c.now = now } }
 
-// NewCore builds a facilitator core over the given ledger, signer and rail.
+// WithRail sets the external stablecoin rail used for payouts (default: mock).
+func WithRail(r rail.Rail) Option { return func(c *Core) { c.rail = r } }
+
+// WithDisputeWindow sets how long escrowed funds are eligible for refund before
+// a delivery-confirmed release is expected (default 24h).
+func WithDisputeWindow(d time.Duration) Option { return func(c *Core) { c.dispute = d } }
+
+// NewCore builds a facilitator core over the given ledger, signer and settler.
+// The external payout rail defaults to a mock; override with WithRail.
 func NewCore(store ledger.Store, signer *x402.Signer, settler settlement.Settlement, opts ...Option) *Core {
 	c := &Core{
 		store:    store,
 		signer:   signer,
 		settler:  settler,
+		rail:     rail.NewMock(),
+		receipts: receipt.NewStore(),
 		services: make(map[string]Service),
 		agents:   make(map[string]Agent),
 		quotes:   make(map[string]x402.Quote),
 		nonces:   make(map[string]bool),
+		escrows:  make(map[string]*EscrowRecord),
+		payouts:  make(map[string]*PayoutRecord),
 		ttl:      30 * time.Second,
+		dispute:  24 * time.Hour,
 		now:      time.Now,
 	}
 	for _, o := range opts {
@@ -120,7 +149,7 @@ func (c *Core) Fund(ctx context.Context, agentID, amount, currency string) error
 			CreatedAt: now, SettledAt: &now,
 		},
 		Entries: []ledger.Entry{
-			{WalletID: "wallet:treasury", Direction: ledger.Debit, Amount: amt.Minor, Currency: currency, CreatedAt: now},
+			{WalletID: walletTreasury, Direction: ledger.Debit, Amount: amt.Minor, Currency: currency, CreatedAt: now},
 			{WalletID: agent.Wallet, Direction: ledger.Credit, Amount: amt.Minor, Currency: currency, CreatedAt: now},
 		},
 	})
@@ -272,41 +301,73 @@ func (c *Core) Settle(ctx context.Context, quoteID string, p x402.Payment, reque
 		return SettleResult{Reason: "insufficient funds"}, nil
 	}
 
-	// Move funds over the rail (mock in Milestone 1).
+	now := c.now().UTC()
+	txID := newID("txn")
+
+	// Single-use nonce: consumed once verification passes and funds are
+	// available, so a replay against a new request is rejected.
+	c.nonces[q.Nonce] = true
+
+	if escrow {
+		// Agent-to-agent with delivery verification: hold funds by crediting the
+		// escrow account. The transaction is "paid" (held), not "settled" —
+		// Release or Refund finalizes it. Receipts issue on release.
+		written, _, err := c.store.Post(ctx, ledger.Posting{
+			Tx: ledger.Transaction{
+				ID: txID, QuoteID: quoteID, AgentID: agent.ID, ServiceID: svc.ID,
+				Amount: amt.Minor, Currency: q.Currency, Status: ledger.StatusPaid,
+				RequestHash: requestHash, Escrow: true, CreatedAt: now,
+			},
+			Entries: []ledger.Entry{
+				{WalletID: agent.Wallet, Direction: ledger.Debit, Amount: amt.Minor, Currency: q.Currency, CreatedAt: now},
+				{WalletID: walletEscrow, Direction: ledger.Credit, Amount: amt.Minor, Currency: q.Currency, CreatedAt: now},
+			},
+		})
+		if err != nil {
+			return SettleResult{}, err
+		}
+		c.escrows[written.ID] = &EscrowRecord{
+			TransactionID: written.ID, BuyerWallet: agent.Wallet, SellerWallet: svc.SellerWallet,
+			AgentID: agent.ID, ServiceID: svc.ID, Amount: amt.Minor, Currency: q.Currency,
+			Status: EscrowHeld, HeldAt: now, ReleaseAfter: now.Add(c.dispute),
+		}
+		return SettleResult{
+			TransactionID: written.ID,
+			Status:        string(ledger.StatusPaid),
+			Settled:       true,
+			Fresh:         true,
+		}, nil
+	}
+
+	// Immediate settlement: move funds buyer -> seller. The internal custodial
+	// move IS the settlement; the settler hook lets a rail observe it.
 	if _, err := c.settler.Settle(ctx, settlement.Instruction{
 		From: agent.Wallet, To: svc.SellerWallet, Amount: amt.Minor,
-		Currency: q.Currency, Ref: quoteID, Escrow: escrow,
+		Currency: q.Currency, Ref: quoteID, Escrow: false,
 	}); err != nil {
 		return SettleResult{}, err
 	}
-
-	now := c.now().UTC()
-	txID := newID("txn")
 	settledAt := now
-	posting := ledger.Posting{
+	written, _, err := c.store.Post(ctx, ledger.Posting{
 		Tx: ledger.Transaction{
 			ID: txID, QuoteID: quoteID, AgentID: agent.ID, ServiceID: svc.ID,
 			Amount: amt.Minor, Currency: q.Currency, Status: ledger.StatusSettled,
-			RequestHash: requestHash, Escrow: escrow, CreatedAt: now, SettledAt: &settledAt,
+			RequestHash: requestHash, CreatedAt: now, SettledAt: &settledAt,
 		},
 		Entries: []ledger.Entry{
 			{WalletID: agent.Wallet, Direction: ledger.Debit, Amount: amt.Minor, Currency: q.Currency, CreatedAt: now},
 			{WalletID: svc.SellerWallet, Direction: ledger.Credit, Amount: amt.Minor, Currency: q.Currency, CreatedAt: now},
 		},
-	}
-	written, _, err := c.store.Post(ctx, posting)
+	})
 	if err != nil {
 		return SettleResult{}, err
 	}
-
-	// Single-use nonce: consumed only after a successful settle, so a failed
-	// attempt can be retried but a replay against a new request is rejected.
-	c.nonces[q.Nonce] = true
+	c.issueReceipts(ctx, written)
 
 	return SettleResult{
 		TransactionID: written.ID,
 		Status:        string(written.Status),
-		ReceiptID:     "rcpt-" + written.ID,
+		ReceiptID:     "rcpt-" + written.ID + "-seller",
 		Settled:       true,
 		Fresh:         true,
 	}, nil

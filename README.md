@@ -44,11 +44,17 @@ tollgate/
 
 ## Status
 
-Spec agreed. **Milestone 1 (the wedge) is implemented in Go**: a minimal facilitator
-(quote → verify → settle), an append-only double-entry ledger with derived balances,
-mock settlement behind a swappable interface, and a `net/http` seller SDK. The exit
-criterion holds end to end: *unpaid request → 402 + signed quote → paid retry → 200 +
-ledger entries*, with idempotent retries that never double-charge.
+Spec agreed. **Milestones 1–2 are implemented in Go.**
+
+- **M1 — the wedge**: a minimal facilitator (quote → verify → settle), an append-only
+  double-entry ledger with derived balances (in-memory + Postgres), and a `net/http`
+  seller SDK. Exit criterion holds end to end: *unpaid → 402 + signed quote → paid
+  retry → 200 + ledger entries*, idempotent.
+- **M2 — real settlement + escrow**: a real stablecoin rail (**Bitnob**) behind a
+  swappable `rail.Rail` interface for **payouts**; **escrow** with `release`/`refund`
+  for agent-to-agent; and **signed receipts** for both parties. Per-call settlement
+  stays custodial/internal (the ledger is the settlement) — see the design note in
+  [docs/07-roadmap.md](docs/07-roadmap.md).
 
 ## Build & run (Milestone 1)
 
@@ -62,6 +68,9 @@ go run ./cmd/facilitator   # standalone facilitator on :8080 (in-memory ledger)
 # Postgres-backed ledger: point the facilitator at a DB with db/schema.sql applied
 DATABASE_URL=postgres://user:pass@host:5432/db go run ./cmd/facilitator
 
+# Real stablecoin payouts via Bitnob (falls back to a mock rail when unset)
+BITNOB_CLIENT_ID=... BITNOB_SECRET=... BITNOB_WEBHOOK_SECRET=... go run ./cmd/facilitator
+
 # Verify the Postgres store against a throwaway DB in Docker
 ./scripts/pgtest.ps1
 ```
@@ -72,11 +81,14 @@ DATABASE_URL=postgres://user:pass@host:5432/db go run ./cmd/facilitator
 ### Code map
 
 ```
-x402/                  # protocol wire types + ed25519 quote/payment signing (public)
+x402/                  # protocol wire types + ed25519 quote/payment/receipt signing (public)
 sdk/go/                # seller SDK: Guard net/http middleware + facilitator client
-internal/facilitator/  # rail: quote / verify / settle core + HTTP handlers
+internal/facilitator/  # rail: quote/verify/settle + escrow + payout + webhook + HTTP
 internal/ledger/       # append-only double-entry store (Store iface + in-memory & Postgres impls)
-internal/settlement/   # Settlement interface + mock rail
+internal/settlement/   # internal (custodial) per-call settlement interface + mock
+internal/rail/         # external stablecoin rail interface + mock ...
+internal/rail/bitnob/  # ... and the real Bitnob rail (HMAC-signed /api/withdrawals)
+internal/receipt/      # signed, verifiable transaction receipts
 internal/money/        # integer minor-units Money (never a float)
 internal/buyer/        # minimal buyer client for the demo/tests
 cmd/demo/              # end-to-end walkthrough

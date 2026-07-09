@@ -9,11 +9,19 @@ import (
 
 // Server exposes the facilitator Core over HTTP (docs/06-api-spec.md).
 type Server struct {
-	core *Core
+	core          *Core
+	webhookSecret string // HMAC secret for verifying rail webhooks (optional)
 }
 
 // NewServer wraps a Core in an HTTP server.
 func NewServer(c *Core) *Server { return &Server{core: c} }
+
+// WithWebhookSecret enables HMAC-SHA256 verification of inbound rail webhooks.
+// When unset, webhooks are accepted without verification (dev only).
+func (s *Server) WithWebhookSecret(secret string) *Server {
+	s.webhookSecret = secret
+	return s
+}
 
 // Routes returns the facilitator's HTTP handler.
 func (s *Server) Routes() http.Handler {
@@ -21,6 +29,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/quotes", s.handleQuote)
 	mux.HandleFunc("POST /v1/payments/verify", s.handleVerify)
 	mux.HandleFunc("POST /v1/payments/settle", s.handleSettle)
+	mux.HandleFunc("POST /v1/escrow/{transactionId}/release", s.handleRelease)
+	mux.HandleFunc("POST /v1/escrow/{transactionId}/refund", s.handleRefund)
+	mux.HandleFunc("POST /v1/payouts", s.handlePayout)
+	mux.HandleFunc("GET /v1/receipts/{transactionId}", s.handleReceipts)
+	mux.HandleFunc("POST /v1/webhooks/bitnob", s.handleBitnobWebhook)
 	return mux
 }
 

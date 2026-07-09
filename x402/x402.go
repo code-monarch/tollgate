@@ -87,6 +87,24 @@ func (s *Signer) SignQuote(q *Quote) {
 	q.Signature = base64.StdEncoding.EncodeToString(sig)
 }
 
+// SignMessage returns the base64 ed25519 signature of msg under the
+// facilitator key. Used for receipts and other facilitator-signed artifacts.
+func (s *Signer) SignMessage(msg []byte) string {
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(s.priv, msg))
+}
+
+// VerifyMessage checks a base64 ed25519 signature of msg against pub.
+func VerifyMessage(pub ed25519.PublicKey, msg []byte, sigB64 string) error {
+	sig, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil {
+		return fmt.Errorf("x402: bad signature encoding: %w", err)
+	}
+	if !ed25519.Verify(pub, msg, sig) {
+		return errors.New("x402: invalid signature")
+	}
+	return nil
+}
+
 // VerifyQuote checks a quote's facilitator signature against pub.
 func VerifyQuote(pub ed25519.PublicKey, q Quote) error {
 	sig, err := base64.StdEncoding.DecodeString(q.Signature)

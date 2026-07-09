@@ -1,7 +1,9 @@
-// Package settlement moves funds from a buyer wallet to a seller wallet. Real
-// implementations hit a stablecoin rail (USDC on Base, etc.); Milestone 1 uses
-// Mock behind the same interface to prove the protocol before wiring money
-// (docs/07-roadmap.md, Milestone 1).
+// Package settlement is the per-call, buyer->seller settlement seam. In
+// Tollgate this is custodial and internal: the double-entry ledger IS the
+// settlement (correct for $0.001 micro-payments, where on-chain gas would dwarf
+// the payment). This interface is an observation/extension hook on that move;
+// Mock is a no-op. External stablecoin movement (payouts, deposits) lives in
+// internal/rail (see docs/07-roadmap.md, Milestone 2).
 package settlement
 
 import (
