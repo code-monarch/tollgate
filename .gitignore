@@ -1,0 +1,12 @@
+# Binaries
+/bin/
+*.exe
+*.test
+*.out
+
+# Go build/test cache is outside the repo; nothing to ignore there.
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
