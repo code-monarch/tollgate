@@ -60,11 +60,19 @@ This keeps the hot path sub-second and cheap while still settling in real stable
 The Bitnob client is written to the documented contract and tested against a mock
 server; moving real funds needs live credentials + a sandbox run.
 
-## Milestone 3 — Marketplace / discovery
+## Milestone 3 — Marketplace / discovery ✅
 
-- `services` registry + search API.
-- Reputation scoring (SLA adherence, dispute rate).
-- MCP server: `search_services`, `get_service`, `call_service`.
+- [x] `services` registry + search API — filter by text/category/max-price/min-reputation,
+      ranked by reputation (`internal/registry`, `internal/marketplace`, `cmd/marketplace`).
+- [x] Reputation scoring from SLA adherence + dispute rate — explainable, no ML on any
+      path; seeds from advertised uptime before the first call (`reputation.go`).
+- [x] MCP server: `search_services`, `get_service`, `call_service` over JSON-RPC/stdio.
+      `call_service` runs the full x402 flow via a buyer client and returns result +
+      receipt (`internal/marketplace/mcp.go`, `caller.go`).
+
+Verified end to end: an agent discovers a service via the MCP `call_service` tool, the
+x402 flow pays the seller through the ledger, and the result + receipt return to the
+caller (`internal/marketplace` e2e test).
 
 ## Milestone 4 — Buyer wallet + policy engine
 
