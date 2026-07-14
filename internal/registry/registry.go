@@ -13,14 +13,25 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tollgate/tollgate/internal/rights"
 )
 
-// Pricing describes how a service is priced. Milestone 1 pricing is static;
-// variable/dynamic are recorded for discovery but resolved at quote time.
+// Pricing describes how a service is priced. Static uses Amount verbatim;
+// variable/dynamic treat Amount as the base and are resolved at quote time from
+// live demand by the pricing engine (internal/pricing), tuned by the optional
+// fields below.
 type Pricing struct {
 	Model    string `json:"model"`    // "static" | "variable" | "dynamic"
-	Amount   string `json:"amount"`   // minor units (static)
+	Amount   string `json:"amount"`   // minor units — exact price (static) or base (variable/dynamic)
 	Currency string `json:"currency"` // e.g. "USDC"
+
+	// Demand-responsive tuning (variable/dynamic only). Zero values mean "unset":
+	// no floor below 1, no ceiling, neutral utilization, no surge.
+	Floor      int64   `json:"floor,omitempty"`      // lower price bound, minor units
+	Ceiling    int64   `json:"ceiling,omitempty"`    // upper price bound, minor units
+	TargetRate float64 `json:"targetRate,omitempty"` // calls-per-window the base is tuned for
+	MaxSurge   float64 `json:"maxSurge,omitempty"`   // max fractional move from base, e.g. 0.5 ⇒ ±50%
 }
 
 // SLA is a service's advertised service level.
@@ -44,6 +55,13 @@ type Service struct {
 	Status       string          `json:"status"` // "listed" | "unlisted"
 	Reputation   float64         `json:"reputation"`
 	CreatedAt    time.Time       `json:"createdAt"`
+
+	// Exhaust is the seller's published claim on the intelligence exhaust of a
+	// call — what it requires, what it would like, and what it pays for it. Making
+	// this a first-class, searchable field of the catalog is the point: a buyer can
+	// choose a model on its terms toward their knowledge, not just its price
+	// (docs/08-learning-boundary.md).
+	Exhaust rights.Offer `json:"exhaust,omitempty"`
 }
 
 // Query filters a Search. Zero-valued fields are ignored.
@@ -52,6 +70,11 @@ type Query struct {
 	Category      string // exact category
 	MaxPrice      *int64 // max static price in minor units
 	MinReputation *float64
+
+	// ExcludeRequired drops any service that *requires* one of these exhaust
+	// rights. This is how a firm shops its own boundary: "find me a geocoder that
+	// will not train on my queries" is a search, not a legal review.
+	ExcludeRequired []rights.Right
 }
 
 // Store is the catalog persistence contract. In-memory for Milestone 3; the
@@ -163,6 +186,19 @@ func matches(s Service, q Query) bool {
 		amt, err := parseMinor(s.Pricing.Amount)
 		if err != nil || amt > *q.MaxPrice {
 			return false
+		}
+	}
+	// Shop the boundary: drop any service that will not serve without a right the
+	// buyer refuses to give up. Only *required* rights disqualify — a service that
+	// merely asks (and pays) for a right is still a usable choice, because the
+	// buyer can decline the ask and pay list price.
+	if len(q.ExcludeRequired) > 0 {
+		for _, unwanted := range q.ExcludeRequired {
+			for _, required := range s.Exhaust.Required {
+				if required == unwanted {
+					return false
+				}
+			}
 		}
 	}
 	return true

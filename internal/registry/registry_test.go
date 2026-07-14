@@ -3,6 +3,8 @@ package registry
 import (
 	"context"
 	"testing"
+
+	"github.com/tollgate/tollgate/internal/rights"
 )
 
 func ptrI(v int64) *int64     { return &v }
@@ -116,4 +118,65 @@ func ids(ss []Service) []string {
 		out[i] = s.ID
 	}
 	return out
+}
+
+// A firm shops its own boundary: find a service that will not demand the right to
+// train on its queries. This is a search, not a legal review
+// (docs/08-learning-boundary.md).
+func TestSearch_ExcludeRequiredRights(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+
+	// A model that will not serve unless it may train on you.
+	mustPut(t, s, Service{
+		ID: "svc_grabby", Name: "Grabby", Category: "nlp",
+		Pricing: Pricing{Model: "static", Amount: "100", Currency: "USDC"},
+		SLA:     SLA{Uptime: 0.99},
+		Exhaust: rights.Offer{Required: []rights.Right{rights.Train}},
+	})
+	// A model that merely ASKS to train, and pays for it — still a usable choice,
+	// because the buyer can decline the ask and pay list price.
+	mustPut(t, s, Service{
+		ID: "svc_polite", Name: "Polite", Category: "nlp",
+		Pricing: Pricing{Model: "static", Amount: "100", Currency: "USDC"},
+		SLA:     SLA{Uptime: 0.99},
+		Exhaust: rights.Offer{
+			Optional: []rights.Right{rights.Train},
+			Rebates:  map[rights.Right]int64{rights.Train: 30},
+		},
+	})
+	// A model that claims nothing at all.
+	mustPut(t, s, Service{
+		ID: "svc_clean", Name: "Clean", Category: "nlp",
+		Pricing: Pricing{Model: "static", Amount: "100", Currency: "USDC"},
+		SLA:     SLA{Uptime: 0.99},
+	})
+
+	all, err := s.Search(ctx, Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("unfiltered search returned %d, want 3", len(all))
+	}
+
+	got, err := s.Search(ctx, Query{ExcludeRequired: []rights.Right{rights.Train}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("excludeRequired=train returned %d services, want 2", len(got))
+	}
+	for _, svc := range got {
+		if svc.ID == "svc_grabby" {
+			t.Fatal("a service that REQUIRES training rights survived the filter")
+		}
+	}
+}
+
+func mustPut(t *testing.T, s *MemStore, svc Service) {
+	t.Helper()
+	if err := s.Put(context.Background(), svc); err != nil {
+		t.Fatal(err)
+	}
 }

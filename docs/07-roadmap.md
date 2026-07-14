@@ -91,10 +91,65 @@ Verified end to end: a policy denies an over-ceiling or budget-exhausted payment
 allows within-limits calls (seller paid via the ledger), and gates a high-value call through
 needs_approval → resolve → pay (`internal/buyerplane` tests).
 
-## Milestone 5 — Analytics + dynamic pricing
+## Milestone 5 — Analytics + dynamic pricing ✅
 
-- Revenue/route, caller cohorts, elasticity.
-- Pricing recommendations; dynamic pricing engine.
+- [x] Analytics read directly off the append-only ledger (`Store.Transactions`,
+      a read-only seam over the same `transactions` the payment flow writes — no
+      parallel metrics store to drift): revenue/route, caller cohorts, and a
+      per-price-point demand table (`internal/analytics`).
+- [x] Price elasticity fitted by ordinary least squares on log(quantity) vs
+      log(price) across observed price points — explainable, deterministic, no ML,
+      matching the reputation model's ethos. Falls back to "insufficient
+      variation" until two distinct prices exist.
+- [x] Pricing recommendation: a bounded (±15%) revenue-maximizing move derived
+      from the elasticity — cut when elastic, raise when inelastic, hold near
+      unit-elastic — with a plain-language rationale and projected revenue lift.
+- [x] Dynamic pricing engine (`internal/pricing`): static / variable (banded
+      tiers) / dynamic (continuous surge from demand vs a target rate), floor+
+      ceiling bounded, a pure and deterministic function of (model, signals).
+- [x] `GET /v1/analytics/services/{id}` + `GET /v1/pricing/services/{id}` served
+      by the marketplace binary over a shared ledger seeded with demo traffic.
+
+Verified end to end: real payments settle through the facilitator, then the
+report read off the same ledger shows the seller's exact accrued revenue, the
+elastic price-cut recommendation, and a demand-driven dynamic surge — over both
+the pure API and HTTP (`internal/analytics` e2e test), plus unit tests for the
+elasticity math and every pricing branch.
+
+## Milestone 6 — The learning boundary (exhaust rights + data dividend) ✅
+
+The answer to the **Reverse Information Paradox**: a firm should be able to *use* a
+model without surrendering the knowledge that makes it unique. Full rationale and
+invariants in [08-learning-boundary.md](08-learning-boundary.md).
+
+- [x] **Rights are protocol, not terms-of-service.** The seller's exhaust ask
+      (`retain`, `train`, `distill`, `share_third_party`, `human_review`,
+      `improve_memory`; required vs optional, with a rebate per right) rides inside
+      the **facilitator-signed quote**; the buyer's grant rides inside the
+      **agent-signed payment**. Neither side can widen, strip or rewrite it
+      (`internal/rights`, `x402`).
+- [x] **Deny by default.** The `exhaust_rights` policy rule declares what an agent
+      may *ever* grant. No rule ⇒ nothing is grantable — enforced centrally, so
+      silence never grants. A seller that *requires* rights the policy refuses is
+      **denied**: no funds move, no data crosses (`internal/policy`).
+- [x] **The exhaust is priced — the data dividend.** Granting rights earns a rebate
+      the seller pays back, settled as explicit legs in the double-entry ledger and
+      booked **gross**, so revenue and the cost-of-knowledge stay separately
+      auditable. Clamped to the price: a call can be free, never negative.
+- [x] **Rights-bearing receipts.** The effective grant and dividend are bound into
+      the facilitator-signed receipt for both parties — Arrow's patent-equivalent,
+      pointed the other way: non-repudiable proof of what was disclosed, granted,
+      refused, and paid for (`internal/receipt`).
+- [x] **Shop the boundary.** `GET /v1/services?excludeRequired=train` finds models
+      that will not demand the right to learn from you. Choosing a model on its
+      terms toward your knowledge is a search, not a legal review.
+
+Verified end to end: a seller demanding training rights is **denied** under a policy
+that grants none (not a cent moves); an optional ask **declined** pays full list
+price with a receipt attesting nothing crossed; an ask **granted** pays the firm its
+dividend and records exactly which rights crossed; a buyer cannot grant more than was
+asked; a dividend can never exceed the price; and a replay re-grants nothing
+(`internal/facilitator/boundary_test.go`, `internal/buyerplane/boundary_test.go`).
 
 ## Cross-cutting (every milestone)
 

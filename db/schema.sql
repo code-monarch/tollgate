@@ -79,8 +79,18 @@ CREATE TABLE IF NOT EXISTS transactions (
     request_hash text NOT NULL UNIQUE,                 -- idempotency key
     escrow       bool NOT NULL DEFAULT false,
     created_at   timestamptz NOT NULL DEFAULT now(),
-    settled_at   timestamptz
+    settled_at   timestamptz,
+
+    -- The learning boundary (docs/08-learning-boundary.md). rebate is the data
+    -- dividend the seller paid back for the exhaust rights in `rights`; it is held
+    -- gross (never netted off amount) so revenue and the cost of knowledge stay
+    -- separately auditable. Net cost to the buyer is amount - rebate.
+    rebate       bigint NOT NULL DEFAULT 0 CHECK (rebate >= 0 AND rebate <= amount),
+    rights       text[] NOT NULL DEFAULT '{}'
 );
+-- Analytics reads the ledger directly (revenue/route, cohorts, elasticity), the
+-- common shape being one service over a time window.
+CREATE INDEX IF NOT EXISTS transactions_service_created ON transactions (service_id, created_at);
 
 CREATE TABLE IF NOT EXISTS ledger_entries (
     id             bigserial PRIMARY KEY,

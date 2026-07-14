@@ -40,6 +40,57 @@ func TestValidate_RejectsNonPositiveAndBadDirection(t *testing.T) {
 	}
 }
 
+func TestMemStore_TransactionsFilterAndOrder(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+
+	post := func(id, service string, status Status, at time.Time) {
+		_, _, err := s.Post(ctx, Posting{
+			Tx: Transaction{
+				ID: id, ServiceID: service, Amount: 1000, Currency: "USDC",
+				Status: status, RequestHash: id, CreatedAt: at,
+			},
+			Entries: []Entry{debit("wallet:a", 1000), credit("wallet:b", 1000)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := time.Unix(1_700_000_000, 0).UTC()
+	post("t3", "svc_a", StatusSettled, base.Add(3*time.Minute))
+	post("t1", "svc_a", StatusSettled, base.Add(1*time.Minute))
+	post("t2", "svc_a", StatusRefunded, base.Add(2*time.Minute))
+	post("t4", "svc_b", StatusSettled, base.Add(4*time.Minute))
+
+	// ServiceID + status filter, returned oldest-first.
+	got, err := s.Transactions(ctx, TxQuery{ServiceID: "svc_a", Statuses: []Status{StatusSettled}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != "t1" || got[1].ID != "t3" {
+		t.Fatalf("service+status filter = %v", ids(got))
+	}
+
+	// Since filter excludes anything before the cutoff.
+	got, _ = s.Transactions(ctx, TxQuery{Since: base.Add(150 * time.Second)}) // > 2m30s
+	if len(got) != 2 || got[0].ID != "t3" || got[1].ID != "t4" {
+		t.Fatalf("since filter = %v", ids(got))
+	}
+
+	// Empty query returns everything.
+	if got, _ = s.Transactions(ctx, TxQuery{}); len(got) != 4 {
+		t.Fatalf("empty query returned %d, want 4", len(got))
+	}
+}
+
+func ids(txns []Transaction) []string {
+	out := make([]string, len(txns))
+	for i, t := range txns {
+		out[i] = t.ID
+	}
+	return out
+}
+
 func TestMemStore_PostAndDerivedBalance(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()

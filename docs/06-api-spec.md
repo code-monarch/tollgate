@@ -88,13 +88,47 @@ Record a billable event (idempotent on `requestHash`). Usually called by the SDK
 // → 200 { "recorded": true }   (duplicate requestHash → { "recorded": false })
 ```
 
-### `GET /v1/analytics/services/{id}`
-Revenue per route, caller cohorts, price elasticity, recommendations.
+### `GET /v1/analytics/services/{id}?since=…`
+Revenue per route, caller cohorts, price elasticity, recommendations, computed off
+settled ledger transactions. `since` is optional (RFC3339 timestamp or a duration
+like `24h`; defaults to a 30-day lookback).
+
+```jsonc
+// → { "serviceId": "svc_…", "revenue": 24000, "calls": 22, "uniqueCallers": 2,
+//     "pricePoints": [ { "price": 1000, "calls": 18, "revenue": 18000 }, … ],
+//     "cohorts": [ { "agentId": "agt_…", "calls": 16, "spend": 18000 }, … ],
+//     "elasticity": { "coefficient": -3.71, "method": "log-log-ols", … },
+//     "recommendation": { "recommendedPrice": 850, "expectedRevenueLift": 0.55, … } }
+```
+
+### `GET /v1/pricing/services/{id}?window=…`
+Resolve the price to quote right now for a service, from its pricing model and the
+settled-call count in the demand `window` (default `1h`). Static returns the base;
+variable/dynamic surge or discount around it.
+
+```jsonc
+// → { "price": 600, "currency": "USDC", "model": "dynamic", "surge": 0.2,
+//     "rationale": "dynamic: 14 call(s)/1h vs target 10 → +20% surge → 600 USDC" }
+```
 
 ## Marketplace / discovery
 
-### `GET /v1/services?query=…&maxPrice=…&category=…&minReputation=…`
-Search the registry. Returns machine-readable entries (price, schema, SLA, reputation).
+### `GET /v1/services?query=…&maxPrice=…&category=…&minReputation=…&excludeRequired=…`
+Search the registry. Returns machine-readable entries (price, schema, SLA, reputation,
+and the service's **exhaust terms**).
+
+`excludeRequired` is a comma-separated list of exhaust rights: any service that *requires*
+one of them is dropped. This is how a firm shops its own learning boundary — finding a
+model that will not demand the right to train on you is a search, not a legal review
+(docs/08-learning-boundary.md).
+
+```jsonc
+// GET /v1/services?excludeRequired=train
+// A listed service advertises what it claims over your intelligence exhaust:
+// { "id": "svc_…", "pricing": { … },
+//   "exhaust": { "optional": ["train","retain"],
+//                "rebates":  { "train": 150, "retain": 25 } } }   // it PAYS to learn from you
+```
 
 ### MCP server
 The marketplace is also exposed as an MCP server so agents discover services the same way

@@ -213,8 +213,18 @@ func (p *Plane) Pay(ctx context.Context, in PayInput) (PayResult, error) {
 	}
 
 	a, _ := p.agent(in.AgentID)
+
+	// Consent is derived from the agent's own policy, never from the seller's ask:
+	// the client will grant at most what the policy made grantable, and the policy
+	// grants nothing unless it says so explicitly (docs/08-learning-boundary.md).
+	var grantable []string
+	if pol, ok := p.policies.Active(ctx, a.scope); ok {
+		grantable = policy.GrantableRights(pol)
+	}
+
 	client := &buyer.Client{
 		AgentID: a.ID, Wallet: a.Wallet, PrivateKey: a.priv, FacilitatorPubKey: p.facPub,
+		Grantable: grantable,
 	}
 	resp, err := client.Pay(in.Quote)
 	if err != nil {
@@ -263,11 +273,19 @@ func (p *Plane) policyRequest(ctx context.Context, a *Agent, in AuthorizeInput) 
 	if err != nil {
 		return policy.Request{}, err
 	}
+	// The rights the seller will not serve without, read from the signed quote. The
+	// engine denies the call if the policy will not grant all of them.
+	var required []string
+	if in.Quote.Exhaust != nil {
+		required = in.Quote.Exhaust.Required
+	}
+
 	return policy.Request{
 		AgentID: a.ID, TaskID: in.TaskID, ServiceID: in.Quote.ServiceID,
 		Amount: amountOf(in.Quote), Currency: in.Quote.Currency,
 		ResourceHost: host, ServiceCategory: in.ServiceCategory,
 		Balance: bal, MedianPrice: in.MedianPrice, Now: p.now().UTC(),
+		RequiredRights: required,
 	}, nil
 }
 

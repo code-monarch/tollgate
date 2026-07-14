@@ -66,12 +66,51 @@ func (e *Engine) Evaluate(ctx context.Context, p Policy, req Request) (Decision,
 		promote(v, r.ID, why)
 	}
 
+	// The learning boundary is deny-by-default, so it is enforced here rather than
+	// inside the rule loop: a policy that carries no exhaust_rights rule grants
+	// nothing, and a seller that demands rights anyway must be refused. Silence
+	// never grants (docs/08-learning-boundary.md).
+	if ungrantable := notIn(req.RequiredRights, GrantableRights(p)); len(ungrantable) > 0 {
+		promote(Deny, exhaustRuleID(p), fmt.Sprintf(
+			"service requires exhaust rights this policy will not grant: %s",
+			strings.Join(ungrantable, ", ")))
+	}
+
 	// Insufficient funds is a hard deny with a distinct reason.
 	if req.Balance < req.Amount {
 		promote(Deny, "insufficient-funds", "insufficient funds")
 	}
 
 	return Decision{Decision: decision, FiredRules: fired, Reason: reason}, nil
+}
+
+// notIn returns the members of want that are absent from have.
+func notIn(want, have []string) []string {
+	if len(want) == 0 {
+		return nil
+	}
+	haveSet := make(map[string]bool, len(have))
+	for _, h := range have {
+		haveSet[h] = true
+	}
+	var missing []string
+	for _, w := range want {
+		if !haveSet[w] {
+			missing = append(missing, w)
+		}
+	}
+	return missing
+}
+
+// exhaustRuleID names the rule to blame in the audit log: the policy's own
+// exhaust_rights rule if it has one, otherwise the implicit closed boundary.
+func exhaustRuleID(p Policy) string {
+	for _, r := range p.Rules {
+		if r.Type == TypeExhaustRights {
+			return r.ID
+		}
+	}
+	return "exhaust-rights-default-deny"
 }
 
 // evalRule returns a single rule's verdict, a human reason, and any error.
@@ -143,6 +182,12 @@ func (e *Engine) evalRule(ctx context.Context, r Rule, req Request) (Action, str
 		if req.Amount >= threshold {
 			return NeedsApproval, fmt.Sprintf("amount %d >= approval threshold %d", req.Amount, threshold), nil
 		}
+		return Allow, "", nil
+
+	case TypeExhaustRights:
+		// Declarative, not restrictive: this rule widens what the agent MAY grant.
+		// The refusal it implies is enforced centrally in Evaluate, because it must
+		// hold even for a policy that carries no exhaust_rights rule at all.
 		return Allow, "", nil
 
 	default:

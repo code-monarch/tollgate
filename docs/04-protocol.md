@@ -50,33 +50,48 @@ WWW-Authenticate: X402 realm="tollgate"
       "quoteId": "q_01H…",
       "nonce": "n_abc…",
       "expiresAt": "2026-07-08T12:00:03Z",
-      "signature": "…facilitator sig…"
+
+      // What the seller claims over the intelligence exhaust of this call.
+      // Absent ⇒ it claims nothing (08-learning-boundary.md).
+      "exhaust": {
+        "required": [],                 // will not serve without these
+        "optional": ["train"],          // would like these…
+        "rebates":  { "train": "150" }  // …and pays this back, per right, if granted
+      },
+      "signature": "…facilitator sig…"  // covers the price AND the rights ask
     }
   ]
 }
 ```
 
 `accepts` is a list so a seller can offer multiple currencies/networks. The quote is
-signed and time-boxed (TTL in seconds).
+signed and time-boxed (TTL in seconds). The exhaust offer is inside the signature, so a
+seller cannot widen its rights ask after the fact.
 
 ## Step 2 — Policy check (buyer side)
 
 Before paying, the buyer plane runs the [policy engine](05-policy-engine.md) against the
-quote: budget remaining, per-call ceiling, domain/category allowlist, velocity, and whether
-the amount crosses a human-approval threshold. Deterministic, logged, `< 10ms`.
+quote: budget remaining, per-call ceiling, domain/category allowlist, velocity, whether
+the amount crosses a human-approval threshold, and **which exhaust rights the agent may
+grant**. Deterministic, logged, `< 10ms`.
 
-- **Allow** → construct payment.
-- **Deny** → return a structured error to the agent (never a silent charge).
+- **Allow** → construct payment, granting at most what the policy permits.
+- **Deny** → return a structured error to the agent (never a silent charge). A seller that
+  *requires* a right the policy will not grant is denied here: no funds move, and no data
+  crosses.
 - **Needs approval** → fire the approval webhook, hold until resolved or timeout.
+
+Rights are **deny-by-default**: a policy with no `exhaust_rights` rule grants nothing.
 
 ## Step 3 — Payment + retry
 
 Buyer constructs a payment payload signed by the agent key and retries the *same* request
-with proof:
+with proof. The payload carries the buyer's `grant` — the rights it consents to — and the
+agent's signature covers it, so consent cannot be forged, widened or stripped in transit:
 
 ```http
 GET /geocode?q=… HTTP/1.1
-X-Payment: <base64 payment payload referencing quoteId + nonce>
+X-Payment: <base64 {quoteId, nonce, agentId, payFrom, grant:["train"], signature}>
 ```
 
 ## Step 4 — Verify + settle
@@ -84,12 +99,20 @@ X-Payment: <base64 payment payload referencing quoteId + nonce>
 Seller enforcement forwards the proof to the facilitator:
 
 - **Verify** — signature valid, quote not expired, nonce unused, amount matches.
+- **Rights** — the effective grant is `(required ∪ optional) ∩ grant`. If the seller
+  *requires* something the buyer did not grant, settlement is **refused**: no funds move
+  and no data crosses.
 - **Settle** — move funds buyer → seller (peer-to-peer stablecoin). For escrowed
-  agent-to-agent calls, hold in escrow and release on delivery confirmation.
-- **Ledger** — write the double-entry pair (debit buyer, credit seller).
+  agent-to-agent calls, hold in escrow and release on delivery confirmation; the granted
+  rights and the dividend vest on release, never on refund.
+- **Ledger** — write the double-entry pair (debit buyer, credit seller), plus the **data
+  dividend** legs when rights were granted (debit seller, credit buyer). Booked gross, so
+  revenue and the cost-of-knowledge stay separately auditable.
 
 On success the seller serves `200` with the resource plus a receipt reference; the seller
-plane records a **meter event** (async, off critical path).
+plane records a **meter event** (async, off critical path). Both parties' receipts bind the
+granted rights and the dividend into the facilitator's signature — a non-repudiable record
+of where the learning boundary was drawn ([08-learning-boundary.md](08-learning-boundary.md)).
 
 ## Pricing models (what the pricing engine may return)
 

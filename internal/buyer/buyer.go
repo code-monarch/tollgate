@@ -22,6 +22,33 @@ type Client struct {
 	// nil, the quote signature is trusted (not recommended).
 	FacilitatorPubKey ed25519.PublicKey
 	HC                *http.Client
+
+	// Grantable is the most this client will ever consent to over the intelligence
+	// exhaust of a call. The actual grant is the intersection of this with what the
+	// seller asked for, so a client never gives away more than the seller wanted
+	// nor more than it permits. Nil means grant nothing — the safe default
+	// (docs/08-learning-boundary.md).
+	Grantable []string
+}
+
+// grantFor is the client's consent for a quote: what the seller asked for,
+// narrowed to what this client is permitted to give. Deny-by-default — an
+// unasked-for or ungrantable right is never offered up.
+func (c *Client) grantFor(q x402.Quote) []string {
+	if q.Exhaust == nil || len(c.Grantable) == 0 {
+		return nil
+	}
+	permitted := make(map[string]bool, len(c.Grantable))
+	for _, r := range c.Grantable {
+		permitted[r] = true
+	}
+	var grant []string
+	for _, asked := range append(append([]string{}, q.Exhaust.Required...), q.Exhaust.Optional...) {
+		if permitted[asked] {
+			grant = append(grant, asked)
+		}
+	}
+	return x402.SortedRights(grant)
 }
 
 // Pay signs the given quote with the agent key and sends the paid request to the
@@ -37,7 +64,10 @@ func (c *Client) Pay(quote x402.Quote) (*http.Response, error) {
 			return nil, fmt.Errorf("buyer: refusing to pay unverified quote: %w", err)
 		}
 	}
-	p := x402.Payment{QuoteID: quote.QuoteID, Nonce: quote.Nonce, AgentID: c.AgentID, PayFrom: c.Wallet}
+	p := x402.Payment{
+		QuoteID: quote.QuoteID, Nonce: quote.Nonce, AgentID: c.AgentID, PayFrom: c.Wallet,
+		Grant: c.grantFor(quote),
+	}
 	x402.SignPayment(c.PrivateKey, &p)
 	header, err := x402.EncodePayment(p)
 	if err != nil {
@@ -92,6 +122,7 @@ func (c *Client) Get(url string) (*http.Response, error) {
 		Nonce:   quote.Nonce,
 		AgentID: c.AgentID,
 		PayFrom: c.Wallet,
+		Grant:   c.grantFor(quote),
 	}
 	x402.SignPayment(c.PrivateKey, &payment)
 	header, err := x402.EncodePayment(payment)

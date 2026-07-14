@@ -49,19 +49,39 @@ type Transaction struct {
 	QuoteID     string
 	AgentID     string
 	ServiceID   string
-	Amount      int64
+	Amount      int64 // gross price, minor units
 	Currency    string
 	Status      Status
 	RequestHash string
 	Escrow      bool
 	CreatedAt   time.Time
 	SettledAt   *time.Time
+
+	// Rebate is the data dividend: what the seller paid back for the exhaust
+	// rights the buyer granted on this call. Held gross rather than netted off
+	// Amount so the books show separately what the seller earned in revenue and
+	// what it paid for knowledge (docs/08-learning-boundary.md). Net cost to the
+	// buyer is Amount - Rebate.
+	Rebate int64
+	// Rights are the exhaust rights that actually crossed the boundary, sorted.
+	// Empty means nothing crossed.
+	Rights []string
 }
 
 // Posting is a transaction plus its balanced entries, written atomically.
 type Posting struct {
 	Tx      Transaction
 	Entries []Entry
+}
+
+// TxQuery filters a transaction listing for analytics reads. Zero-valued fields
+// are ignored, so an empty query returns every transaction. It reads the
+// append-only ledger — the honest source of settled revenue — rather than a
+// separate metrics store (docs/02-architecture.md, analytics).
+type TxQuery struct {
+	ServiceID string    // exact service (route) match
+	Since     time.Time // created_at >= Since (UTC)
+	Statuses  []Status  // any-of; empty means all statuses
 }
 
 // ErrUnbalanced is returned when a posting's debits and credits do not net to
@@ -80,6 +100,9 @@ type Store interface {
 	Balance(ctx context.Context, walletID, currency string) (int64, error)
 	// TransactionByRequestHash returns the existing transaction, or ok=false.
 	TransactionByRequestHash(ctx context.Context, requestHash string) (Transaction, bool, error)
+	// Transactions lists transactions matching q, in creation order (oldest
+	// first). It is a read-only analytics seam; it never mutates the ledger.
+	Transactions(ctx context.Context, q TxQuery) ([]Transaction, error)
 }
 
 // Validate enforces the invariants a posting must satisfy before it is written:
