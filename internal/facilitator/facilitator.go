@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/tollgate/tollgate/internal/money"
 	"github.com/tollgate/tollgate/internal/rail"
 	"github.com/tollgate/tollgate/internal/receipt"
+	"github.com/tollgate/tollgate/internal/rights"
 	"github.com/tollgate/tollgate/internal/settlement"
 	"github.com/tollgate/tollgate/x402"
 )
@@ -39,6 +41,12 @@ type Service struct {
 	Network      string
 	Asset        string
 	PayTo        string // on-chain address (display only)
+
+	// Exhaust is the seller's claim on the intelligence exhaust of a call: the
+	// rights it requires, the rights it would like, and the dividend it will pay
+	// for them. The zero value claims nothing — the safe default
+	// (docs/08-learning-boundary.md).
+	Exhaust rights.Offer
 }
 
 // Agent is a buyer identity bound to a wallet and an ed25519 verifying key.
@@ -188,6 +196,9 @@ func (c *Core) IssueQuote(ctx context.Context, req QuoteRequest) (x402.Quote, er
 		Resource:  req.Resource,
 		Nonce:     newID("n"),
 		ExpiresAt: c.now().Add(c.ttl).UTC(),
+		// The seller's rights ask travels inside the signed quote, so the buyer
+		// decides on it with the same certainty it decides on the price.
+		Exhaust: svc.Exhaust.ToWire(),
 	}
 	c.signer.SignQuote(&q)
 	c.quotes[q.QuoteID] = q
@@ -256,6 +267,12 @@ type SettleResult struct {
 	Reason        string
 	Settled       bool
 	Fresh         bool
+
+	// Rights are the exhaust rights that actually crossed the boundary on this
+	// call, and Rebate is the data dividend the seller paid back for them. Both
+	// are bound into the signed receipts (docs/08-learning-boundary.md).
+	Rights []string
+	Rebate int64
 }
 
 // Settle verifies a proof then moves funds and writes the ledger pair. It is
@@ -291,13 +308,34 @@ func (c *Core) Settle(ctx context.Context, quoteID string, p x402.Payment, reque
 		return SettleResult{}, err
 	}
 
+	// The learning boundary. The offer is read from the SIGNED quote — what the
+	// buyer actually saw and consented against — not from the mutable registry.
+	// The grant is covered by the buyer's own signature (verified above), so
+	// neither side can rewrite what was asked or what was given.
+	offer := rights.FromWire(q.Exhaust)
+	granted := rights.ParseRights(p.Grant)
+
+	// A seller that will not serve without rights the buyer refused gets nothing:
+	// no funds move and no data crosses. This is the hard boundary.
+	if missing := rights.Missing(offer, granted); len(missing) > 0 {
+		return SettleResult{Reason: "required exhaust rights not granted: " +
+			strings.Join(rights.Strings(missing), ", ")}, nil
+	}
+
+	// Only what was both asked for and granted crosses; the dividend is what the
+	// seller pays back for it, and it can never exceed the price.
+	effective := rights.Effective(offer, granted)
+	rebate := rights.Clamp(rights.Rebate(offer, effective), amt.Minor)
+	net := amt.Minor - rebate
+
 	// Balance is derived from the ledger; insufficient funds is a distinct
-	// rejection, not an error.
+	// rejection, not an error. The buyer only needs to cover the NET cost — the
+	// dividend it earns offsets the price in the same atomic posting.
 	bal, err := c.store.Balance(ctx, agent.Wallet, q.Currency)
 	if err != nil {
 		return SettleResult{}, err
 	}
-	if bal < amt.Minor {
+	if bal < net {
 		return SettleResult{Reason: "insufficient funds"}, nil
 	}
 
@@ -311,12 +349,14 @@ func (c *Core) Settle(ctx context.Context, quoteID string, p x402.Payment, reque
 	if escrow {
 		// Agent-to-agent with delivery verification: hold funds by crediting the
 		// escrow account. The transaction is "paid" (held), not "settled" —
-		// Release or Refund finalizes it. Receipts issue on release.
+		// Release or Refund finalizes it. Receipts issue on release, and so does
+		// the data dividend: rights only vest against a completed call.
 		written, _, err := c.store.Post(ctx, ledger.Posting{
 			Tx: ledger.Transaction{
 				ID: txID, QuoteID: quoteID, AgentID: agent.ID, ServiceID: svc.ID,
 				Amount: amt.Minor, Currency: q.Currency, Status: ledger.StatusPaid,
 				RequestHash: requestHash, Escrow: true, CreatedAt: now,
+				Rebate: rebate, Rights: rights.Strings(effective),
 			},
 			Entries: []ledger.Entry{
 				{WalletID: agent.Wallet, Direction: ledger.Debit, Amount: amt.Minor, Currency: q.Currency, CreatedAt: now},
@@ -330,22 +370,33 @@ func (c *Core) Settle(ctx context.Context, quoteID string, p x402.Payment, reque
 			TransactionID: written.ID, BuyerWallet: agent.Wallet, SellerWallet: svc.SellerWallet,
 			AgentID: agent.ID, ServiceID: svc.ID, Amount: amt.Minor, Currency: q.Currency,
 			Status: EscrowHeld, HeldAt: now, ReleaseAfter: now.Add(c.dispute),
+			Rebate: rebate, Rights: rights.Strings(effective),
 		}
 		return SettleResult{
 			TransactionID: written.ID,
 			Status:        string(ledger.StatusPaid),
 			Settled:       true,
 			Fresh:         true,
+			Rights:        rights.Strings(effective),
+			Rebate:        rebate,
 		}, nil
 	}
 
 	// Immediate settlement: move funds buyer -> seller. The internal custodial
-	// move IS the settlement; the settler hook lets a rail observe it.
-	if _, err := c.settler.Settle(ctx, settlement.Instruction{
-		From: agent.Wallet, To: svc.SellerWallet, Amount: amt.Minor,
-		Currency: q.Currency, Ref: quoteID, Escrow: false,
-	}); err != nil {
-		return SettleResult{}, err
+	// move IS the settlement; the settler hook lets a rail observe it. The rail
+	// observes the NET movement — the dividend is an internal counter-flow.
+	//
+	// A dividend generous enough to cover the whole price nets to zero: the call is
+	// free, the buyer having paid for it entirely in knowledge. There is no funds
+	// movement for the rail to observe, so we skip it — the ledger still records
+	// both gross legs below, which is where the trade is actually visible.
+	if net > 0 {
+		if _, err := c.settler.Settle(ctx, settlement.Instruction{
+			From: agent.Wallet, To: svc.SellerWallet, Amount: net,
+			Currency: q.Currency, Ref: quoteID, Escrow: false,
+		}); err != nil {
+			return SettleResult{}, err
+		}
 	}
 	settledAt := now
 	written, _, err := c.store.Post(ctx, ledger.Posting{
@@ -353,11 +404,9 @@ func (c *Core) Settle(ctx context.Context, quoteID string, p x402.Payment, reque
 			ID: txID, QuoteID: quoteID, AgentID: agent.ID, ServiceID: svc.ID,
 			Amount: amt.Minor, Currency: q.Currency, Status: ledger.StatusSettled,
 			RequestHash: requestHash, CreatedAt: now, SettledAt: &settledAt,
+			Rebate: rebate, Rights: rights.Strings(effective),
 		},
-		Entries: []ledger.Entry{
-			{WalletID: agent.Wallet, Direction: ledger.Debit, Amount: amt.Minor, Currency: q.Currency, CreatedAt: now},
-			{WalletID: svc.SellerWallet, Direction: ledger.Credit, Amount: amt.Minor, Currency: q.Currency, CreatedAt: now},
-		},
+		Entries: dividendEntries(agent.Wallet, svc.SellerWallet, amt.Minor, rebate, q.Currency, now),
 	})
 	if err != nil {
 		return SettleResult{}, err
@@ -370,7 +419,33 @@ func (c *Core) Settle(ctx context.Context, quoteID string, p x402.Payment, reque
 		ReceiptID:     "rcpt-" + written.ID + "-seller",
 		Settled:       true,
 		Fresh:         true,
+		Rights:        rights.Strings(effective),
+		Rebate:        rebate,
 	}, nil
+}
+
+// dividendEntries builds the balanced legs of a settlement. Without a dividend it
+// is the ordinary two-leg move. With one it is four legs, gross: the buyer pays
+// the full price and the seller pays back what the buyer's knowledge was worth.
+//
+//	debit  buyer   price     credit seller  price     (revenue)
+//	debit  seller  rebate    credit buyer   rebate    (data dividend)
+//
+// Booking it gross rather than netting to a discount is the point: a seller's
+// books then show exactly what it paid to learn from its customers, and a buyer's
+// show exactly what its exhaust earned (docs/08-learning-boundary.md).
+func dividendEntries(buyerWallet, sellerWallet string, price, rebate int64, currency string, at time.Time) []ledger.Entry {
+	entries := []ledger.Entry{
+		{WalletID: buyerWallet, Direction: ledger.Debit, Amount: price, Currency: currency, CreatedAt: at},
+		{WalletID: sellerWallet, Direction: ledger.Credit, Amount: price, Currency: currency, CreatedAt: at},
+	}
+	if rebate > 0 {
+		entries = append(entries,
+			ledger.Entry{WalletID: sellerWallet, Direction: ledger.Debit, Amount: rebate, Currency: currency, CreatedAt: at},
+			ledger.Entry{WalletID: buyerWallet, Direction: ledger.Credit, Amount: rebate, Currency: currency, CreatedAt: at},
+		)
+	}
+	return entries
 }
 
 // newID returns a prefixed, random, URL-safe identifier.

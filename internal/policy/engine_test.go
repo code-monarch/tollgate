@@ -2,6 +2,8 @@ package policy
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -198,4 +200,96 @@ func TestFullPolicy_Allows(t *testing.T) {
 	if d := eval(t, rules, baseReq()); d.Decision != Allow || len(d.FiredRules) != 0 {
 		t.Fatalf("normal call should cleanly allow, got %+v", d)
 	}
+}
+
+// --- the learning boundary (docs/08-learning-boundary.md) ---
+
+// exhaustReq is a well-funded request for a service demanding the given rights.
+func exhaustReq(required ...string) Request {
+	return Request{
+		AgentID: "agt_1", ServiceID: "svc_1", Amount: 1000, Currency: "USDC",
+		Balance: 1_000_000, RequiredRights: required, Now: time.Now(),
+	}
+}
+
+// A policy that never mentions exhaust rights grants none. A seller demanding
+// training rights is refused — this is the hole that silence must not open.
+func TestExhaustRights_NoRuleMeansNothingIsGrantable(t *testing.T) {
+	e := NewEngine(NewMemTracker())
+	pol := Policy{
+		Currency: "USDC",
+		Rules:    []Rule{{ID: "ceiling", Type: TypeAmountCeiling, Max: "5000"}},
+	}
+
+	dec, err := e.Evaluate(context.Background(), pol, exhaustReq("train"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec.Decision != Deny {
+		t.Fatalf("decision = %s, want deny: a policy with no exhaust_rights rule must grant nothing", dec.Decision)
+	}
+	if !contains(dec.FiredRules, "exhaust-rights-default-deny") {
+		t.Fatalf("firedRules = %v, want the implicit closed boundary named", dec.FiredRules)
+	}
+
+	// The same policy still allows a service that demands nothing.
+	dec, _ = e.Evaluate(context.Background(), pol, exhaustReq())
+	if dec.Decision != Allow {
+		t.Fatalf("decision = %s, want allow for a service claiming no rights", dec.Decision)
+	}
+}
+
+// A seller may only demand rights the policy has explicitly made grantable.
+func TestExhaustRights_DeniesUngrantableDemand(t *testing.T) {
+	e := NewEngine(NewMemTracker())
+	pol := Policy{
+		Currency: "USDC",
+		Rules: []Rule{
+			{ID: "exhaust", Type: TypeExhaustRights, Values: []string{"retain", "human_review"}},
+		},
+	}
+
+	// retain is grantable → allow.
+	if dec, _ := e.Evaluate(context.Background(), pol, exhaustReq("retain")); dec.Decision != Allow {
+		t.Fatalf("decision = %s, want allow (retain is grantable)", dec.Decision)
+	}
+
+	// train is not → deny, naming the rule and the offending right.
+	dec, _ := e.Evaluate(context.Background(), pol, exhaustReq("retain", "train"))
+	if dec.Decision != Deny {
+		t.Fatalf("decision = %s, want deny (train is not grantable)", dec.Decision)
+	}
+	if !contains(dec.FiredRules, "exhaust") {
+		t.Fatalf("firedRules = %v, want [exhaust]", dec.FiredRules)
+	}
+	if !strings.Contains(dec.Reason, "train") {
+		t.Fatalf("reason = %q, want it to name the ungrantable right", dec.Reason)
+	}
+	if strings.Contains(dec.Reason, "retain") {
+		t.Fatalf("reason = %q, should only blame the right that was NOT grantable", dec.Reason)
+	}
+}
+
+func TestGrantableRights_UnionsRulesAndDefaultsClosed(t *testing.T) {
+	if got := GrantableRights(Policy{}); len(got) != 0 {
+		t.Fatalf("an empty policy made %v grantable, want nothing", got)
+	}
+	pol := Policy{Rules: []Rule{
+		{ID: "a", Type: TypeExhaustRights, Values: []string{"retain"}},
+		{ID: "b", Type: TypeExhaustRights, Values: []string{"human_review", "retain"}},
+		{ID: "c", Type: TypeAmountCeiling, Max: "10"},
+	}}
+	got := GrantableRights(pol)
+	if !reflect.DeepEqual(got, []string{"human_review", "retain"}) {
+		t.Fatalf("grantable = %v, want deduped+sorted [human_review retain]", got)
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }

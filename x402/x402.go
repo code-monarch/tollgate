@@ -16,12 +16,28 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 )
 
 // Version is the x402 protocol version this implementation speaks.
 const Version = 1
+
+// ExhaustOffer is the seller's claim on the *intelligence exhaust* of a call —
+// the prompts, context, traces and corrections that cross the boundary while the
+// request is served. Required rights are non-negotiable (the seller will not
+// serve without them); optional rights are asked for, with a rebate offered in
+// exchange. Because the offer rides inside the facilitator-signed quote, a seller
+// cannot change what it asked for after the fact (docs/08-learning-boundary.md).
+//
+// Rights are plain strings here to keep x402 dependency-free; internal/rights
+// holds the vocabulary and the semantics.
+type ExhaustOffer struct {
+	Required []string          `json:"required,omitempty"` // will not serve without these
+	Optional []string          `json:"optional,omitempty"` // would like these
+	Rebates  map[string]string `json:"rebates,omitempty"`  // right -> minor units returned if granted
+}
 
 // Quote is a signed, time-boxed price challenge returned inside a 402 response.
 // The signature is produced by the facilitator over the canonical encoding of
@@ -39,7 +55,11 @@ type Quote struct {
 	Resource  string    `json:"resource"` // the guarded URL
 	Nonce     string    `json:"nonce"`    // single-use
 	ExpiresAt time.Time `json:"expiresAt"`
-	Signature string    `json:"signature"` // facilitator ed25519 sig, base64
+
+	// Exhaust is the seller's rights ask. Nil means the seller claims nothing:
+	// the call is served and the exhaust stays entirely on the buyer's side.
+	Exhaust   *ExhaustOffer `json:"exhaust,omitempty"`
+	Signature string        `json:"signature"` // facilitator ed25519 sig, base64
 }
 
 // PaymentRequired is the JSON body of a 402 response. accepts is a list so a
@@ -51,13 +71,18 @@ type PaymentRequired struct {
 
 // Payment is the decoded X-Payment header: the buyer's proof that it authorized
 // paying a specific quote. Signature is the agent's ed25519 signature over the
-// quote id, nonce, agent id and paying wallet.
+// quote id, nonce, agent id, paying wallet and the rights granted.
 type Payment struct {
-	QuoteID   string `json:"quoteId"`
-	Nonce     string `json:"nonce"`
-	AgentID   string `json:"agentId"`
-	PayFrom   string `json:"payFrom"`   // buyer wallet id
-	Signature string `json:"signature"` // agent ed25519 sig, base64
+	QuoteID string `json:"quoteId"`
+	Nonce   string `json:"nonce"`
+	AgentID string `json:"agentId"`
+	PayFrom string `json:"payFrom"` // buyer wallet id
+
+	// Grant is the buyer's consent: the exhaust rights it permits for this call.
+	// It is covered by the agent's signature, so consent is non-repudiable. An
+	// empty grant means nothing crosses the boundary — silence never grants.
+	Grant     []string `json:"grant,omitempty"`
+	Signature string   `json:"signature"` // agent ed25519 sig, base64
 }
 
 // ---- facilitator quote signing ----
@@ -118,13 +143,16 @@ func VerifyQuote(pub ed25519.PublicKey, q Quote) error {
 }
 
 // quoteSigningBytes is the canonical, signature-free encoding of a quote. Field
-// order is fixed; timestamps use RFC3339Nano in UTC so the bytes are stable.
+// order is fixed; timestamps use RFC3339Nano in UTC so the bytes are stable. The
+// exhaust offer is included, so the seller's rights ask is as tamper-proof as its
+// price.
 func quoteSigningBytes(q Quote) []byte {
 	var b strings.Builder
 	fields := []string{
 		q.QuoteID, q.ServiceID, q.Scheme, q.Network, q.Asset,
 		q.Amount, q.Currency, q.PayTo, q.Resource, q.Nonce,
 		q.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		exhaustSigningString(q.Exhaust),
 	}
 	for i, f := range fields {
 		if i > 0 {
@@ -133,6 +161,44 @@ func quoteSigningBytes(q Quote) []byte {
 		b.WriteString(f)
 	}
 	return []byte(b.String())
+}
+
+// exhaustSigningString canonically encodes an exhaust offer: each list sorted and
+// the rebate map emitted in sorted key order, so the bytes are stable regardless
+// of map iteration or caller ordering. A nil offer (the seller claims nothing)
+// encodes to the empty string, which keeps signatures stable for callers that
+// never touch rights at all.
+func exhaustSigningString(o *ExhaustOffer) string {
+	if o == nil {
+		return ""
+	}
+	rebates := make([]string, 0, len(o.Rebates))
+	for right, amount := range o.Rebates {
+		rebates = append(rebates, right+"="+amount)
+	}
+	sort.Strings(rebates)
+	return strings.Join(SortedRights(o.Required), ",") + ";" +
+		strings.Join(SortedRights(o.Optional), ",") + ";" +
+		strings.Join(rebates, ",")
+}
+
+// SortedRights returns a sorted copy of rs with duplicates removed, so that two
+// grants naming the same rights in a different order sign to the same bytes.
+func SortedRights(rs []string) []string {
+	if len(rs) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(rs))
+	out := make([]string, 0, len(rs))
+	for _, r := range rs {
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ---- agent payment signing ----
@@ -155,8 +221,12 @@ func VerifyPayment(pub ed25519.PublicKey, p Payment) error {
 	return nil
 }
 
+// paymentSigningBytes covers the granted rights as well as the payment fields, so
+// a buyer's consent cannot be forged, widened or stripped in transit: altering the
+// grant invalidates the agent's signature.
 func paymentSigningBytes(p Payment) []byte {
-	return []byte(p.QuoteID + "\n" + p.Nonce + "\n" + p.AgentID + "\n" + p.PayFrom)
+	return []byte(p.QuoteID + "\n" + p.Nonce + "\n" + p.AgentID + "\n" + p.PayFrom +
+		"\n" + strings.Join(SortedRights(p.Grant), ","))
 }
 
 // ---- X-Payment header codec ----

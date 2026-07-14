@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"sort"
 	"sync"
 )
 
@@ -76,4 +77,51 @@ func (m *MemStore) TransactionByRequestHash(ctx context.Context, requestHash str
 	defer m.mu.Unlock()
 	tx, ok := m.byHash[requestHash]
 	return tx, ok, nil
+}
+
+// Transactions implements Store. It reads byID, so each transaction appears once
+// in its final state — an escrow that was held then released shows as one
+// settled row, not a paid+settled pair. Results are ordered by CreatedAt then ID
+// for determinism.
+func (m *MemStore) Transactions(ctx context.Context, q TxQuery) ([]Transaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var out []Transaction
+	for _, tx := range m.byID {
+		if !txMatches(tx, q) {
+			continue
+		}
+		out = append(out, tx)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+// txMatches reports whether tx satisfies the query's non-zero filters.
+func txMatches(tx Transaction, q TxQuery) bool {
+	if q.ServiceID != "" && tx.ServiceID != q.ServiceID {
+		return false
+	}
+	if !q.Since.IsZero() && tx.CreatedAt.Before(q.Since) {
+		return false
+	}
+	if len(q.Statuses) > 0 {
+		found := false
+		for _, s := range q.Statuses {
+			if tx.Status == s {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }

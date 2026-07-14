@@ -44,7 +44,7 @@ tollgate/
 
 ## Status
 
-Spec agreed. **Milestones 1–4 are implemented in Go.**
+Spec agreed. **Milestones 1–6 are implemented in Go.**
 
 - **M1 — the wedge**: a minimal facilitator (quote → verify → settle), an append-only
   double-entry ledger with derived balances (in-memory + Postgres), and a `net/http`
@@ -63,6 +63,20 @@ Spec agreed. **Milestones 1–4 are implemented in Go.**
   (agents, wallets, funding) and a deterministic, deny-by-default **policy engine** — amount
   ceilings, task/rolling budgets, allow/blocklists, velocity, price-spike anomaly, and
   human-approval. `/authorize` gates every payment; `/pay` signs + settles only if allowed.
+- **M5 — analytics + dynamic pricing** (the retention layer): revenue/route, caller cohorts
+  and **price elasticity** read directly off the ledger; a bounded, explainable **pricing
+  recommendation** from that elasticity; and a deterministic **dynamic-pricing engine**
+  (static / variable / surge). Served as `GET /v1/analytics/services/{id}` and
+  `GET /v1/pricing/services/{id}` on the marketplace binary. No ML on any path.
+- **M6 — the learning boundary** (exhaust rights + data dividend): the answer to the
+  **Reverse Information Paradox** — *use a model without surrendering the knowledge that
+  makes you unique*. A seller's claim on your intelligence exhaust (`train`, `retain`,
+  `distill`, …) rides inside the **signed quote**; your consent rides inside the **signed
+  payment**. It is **deny-by-default** — a seller that requires rights your policy refuses
+  is denied and *nothing crosses*. Rights you do grant are **paid for**: the seller's data
+  dividend settles as explicit, gross legs in the double-entry ledger, and the grant is
+  bound into both parties' signed receipts. See
+  [docs/08-learning-boundary.md](docs/08-learning-boundary.md).
 
 ## Build & run (Milestone 1)
 
@@ -72,7 +86,7 @@ Requires Go 1.23+.
 go test ./...          # unit + end-to-end tests (in-process and over HTTP)
 go run ./cmd/demo      # prints the full 402 dance in one process
 go run ./cmd/facilitator   # standalone facilitator on :8080 (in-memory ledger)
-go run ./cmd/marketplace       # marketplace HTTP API on :8081
+go run ./cmd/marketplace       # marketplace + analytics/pricing HTTP API on :8081
 go run ./cmd/marketplace -mcp  # marketplace as an MCP server over stdio
 go run ./cmd/buyer             # buyer plane (wallets + policy engine) on :8082
 
@@ -102,6 +116,9 @@ internal/rail/bitnob/  # ... and the real Bitnob rail (HMAC-signed /api/withdraw
 internal/receipt/      # signed, verifiable transaction receipts
 internal/registry/     # marketplace catalog: service entries, search, reputation
 internal/marketplace/  # marketplace HTTP API + MCP server (+ buyer-driven call_service)
+internal/analytics/    # seller analytics: revenue/cohorts/elasticity + recommendation (+ HTTP)
+internal/pricing/      # deterministic dynamic-pricing engine (static/variable/surge)
+internal/rights/       # the learning boundary: exhaust rights, consent, the data dividend
 internal/policy/       # buyer-side moat: policy engine, rule types, tracker, approvals
 internal/buyerplane/   # custodial buyer plane: agents/wallets/policies + authorize/pay
 internal/money/        # integer minor-units Money (never a float)

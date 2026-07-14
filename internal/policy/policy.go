@@ -8,6 +8,7 @@ package policy
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -30,6 +31,11 @@ const (
 	TypeVelocity      = "velocity"
 	TypeAnomaly       = "anomaly"
 	TypeApproval      = "approval"
+	// TypeExhaustRights gates what the agent may ever grant a seller over the
+	// intelligence exhaust of a call. Values lists the grantable rights. Absent
+	// rule ⇒ nothing is grantable: silence never grants
+	// (docs/08-learning-boundary.md).
+	TypeExhaustRights = "exhaust_rights"
 )
 
 // Rule is one entry in a policy. Fields are a superset across rule types; only
@@ -44,7 +50,8 @@ type Rule struct {
 	Window string `json:"window,omitempty"` // task | 24h | 1h | 1m | Go duration
 
 	Field  string   `json:"field,omitempty"`  // allowlist/blocklist: resource_host | service_category | ...
-	Values []string `json:"values,omitempty"` // allowlist/blocklist values (host globs allowed)
+	Values []string `json:"values,omitempty"` // allowlist/blocklist values (host globs allowed);
+	//                                           exhaust_rights: the grantable rights
 
 	MaxCount int `json:"max_count,omitempty"` // velocity
 
@@ -82,6 +89,11 @@ type Request struct {
 	Balance         int64 // available balance, minor units (caller reads from ledger)
 	MedianPrice     int64 // median price for this service (anomaly); 0 = unknown
 	Now             time.Time
+
+	// RequiredRights are the exhaust rights the seller will not serve without,
+	// read from the signed quote. If the policy does not make all of them
+	// grantable, the call is denied and nothing crosses the boundary.
+	RequiredRights []string
 }
 
 // Decision is the engine's output. FiredRules lists every rule that constrained
@@ -90,6 +102,32 @@ type Decision struct {
 	Decision   Action   `json:"decision"`
 	FiredRules []string `json:"firedRules"`
 	Reason     string   `json:"reason,omitempty"`
+}
+
+// GrantableRights is the union of every exhaust_rights rule's Values: the complete
+// set of rights this policy permits the agent to grant a seller, and therefore the
+// most the buyer will ever consent to.
+//
+// A policy with no exhaust_rights rule returns nothing — the boundary is closed by
+// default, and a seller that asks for nothing still gets nothing. This is the
+// deliberate inverse of the industry default, where usage rights are reserved
+// unless the customer opts out (docs/08-learning-boundary.md).
+func GrantableRights(p Policy) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, r := range p.Rules {
+		if r.Type != TypeExhaustRights {
+			continue
+		}
+		for _, v := range r.Values {
+			if v != "" && !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ---- versioned policy store ----

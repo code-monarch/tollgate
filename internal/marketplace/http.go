@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/tollgate/tollgate/internal/registry"
+	"github.com/tollgate/tollgate/internal/rights"
 )
 
 // Server serves the marketplace HTTP API over a registry Store.
@@ -62,6 +64,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			q.MinReputation = &f
 		}
+	}
+	// ?excludeRequired=train,distill — find services that will not demand these
+	// rights over your intelligence exhaust (docs/08-learning-boundary.md).
+	if v := r.URL.Query().Get("excludeRequired"); v != "" {
+		q.ExcludeRequired = rights.ParseRights(strings.Split(v, ","))
 	}
 	results, err := s.store.Search(r.Context(), q)
 	if err != nil {

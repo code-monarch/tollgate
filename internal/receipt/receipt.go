@@ -24,16 +24,30 @@ const (
 )
 
 // Receipt is a signed proof of a completed transaction, held by one party.
+//
+// It is also the instrument the Reverse Information Paradox needs: by binding the
+// exhaust rights that crossed the boundary into the same signed artifact as the
+// payment, it becomes a non-repudiable record of exactly what was disclosed, what
+// was granted, what was refused, and what was paid for it. If a seller later trains
+// on a trace it was never granted, the buyer holds the proof — and an honest seller
+// holds proof that it did not (docs/08-learning-boundary.md).
 type Receipt struct {
 	ID            string    `json:"id"`
 	TransactionID string    `json:"transactionId"`
 	Party         Party     `json:"party"`
 	AgentID       string    `json:"agentId"`
 	ServiceID     string    `json:"serviceId"`
-	Amount        string    `json:"amount"` // minor units
+	Amount        string    `json:"amount"` // gross price, minor units
 	Currency      string    `json:"currency"`
 	IssuedAt      time.Time `json:"issuedAt"`
-	Signature     string    `json:"signature"` // facilitator ed25519, base64
+
+	// Rights are the exhaust rights granted on this call, sorted. An empty list is
+	// a positive claim, not an absence: it attests that nothing crossed.
+	Rights []string `json:"rights"`
+	// Rebate is the data dividend the seller paid for those rights, minor units.
+	Rebate string `json:"rebate"`
+
+	Signature string `json:"signature"` // facilitator ed25519, base64
 }
 
 // signer is the subset of x402.Signer receipts need (also lets tests fake it).
@@ -54,12 +68,20 @@ func Verify(pub ed25519.PublicKey, r Receipt) error {
 	return x402.VerifyMessage(pub, signingBytes(r), r.Signature)
 }
 
-// signingBytes is the canonical, signature-free encoding of a receipt.
+// signingBytes is the canonical, signature-free encoding of a receipt. The granted
+// rights and the dividend are covered, so neither party can later alter the record
+// of what crossed the boundary. Rights are sorted for a stable encoding; a rebate
+// of "" normalizes to "0".
 func signingBytes(r Receipt) []byte {
+	rebate := r.Rebate
+	if rebate == "" {
+		rebate = "0"
+	}
 	var b strings.Builder
 	fields := []string{
 		r.ID, r.TransactionID, string(r.Party), r.AgentID, r.ServiceID,
 		r.Amount, r.Currency, r.IssuedAt.UTC().Format(time.RFC3339Nano),
+		strings.Join(x402.SortedRights(r.Rights), ","), rebate,
 	}
 	for i, f := range fields {
 		if i > 0 {

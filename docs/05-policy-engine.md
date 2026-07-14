@@ -72,6 +72,11 @@ It must be deterministic, fast (`< 10ms`), and fully logged.
       "webhook": "https://buyer.example.com/approvals",
       "timeout": "300s",
       "on_timeout": "deny"
+    },
+    {
+      "id": "exhaust",
+      "type": "exhaust_rights",
+      "values": ["retain"]                   // the ONLY rights this agent may ever grant
     }
   ]
 }
@@ -87,6 +92,21 @@ It must be deterministic, fast (`< 10ms`), and fully logged.
 | `velocity` | max request count per window (rate limiting spend) |
 | `anomaly` | statistical flags (price spike vs median, novel counterparty, burst) |
 | `approval` | route to a human above a threshold; hold until resolved |
+| `exhaust_rights` | what the agent may grant over its **intelligence exhaust** |
+
+### `exhaust_rights` — the learning boundary
+
+The one rule that gates *knowledge* rather than money. `values` lists the exhaust rights
+this agent may ever grant a seller (`retain`, `train`, `distill`, `share_third_party`,
+`human_review`, `improve_memory`).
+
+It is **deny-by-default and closed**: a policy with no `exhaust_rights` rule grants
+nothing, so silence is refusal. A seller that *requires* a right outside `values` is
+**denied** — the call cannot proceed, because paying would mean surrendering knowledge the
+firm has decided never to give up. Rights inside `values` are granted only when the seller
+actually asks for them, and are paid for via the data dividend.
+
+See [08-learning-boundary.md](08-learning-boundary.md).
 
 ## Evaluation
 
@@ -101,9 +121,12 @@ Algorithm:
 1. Start from `defaults.action` (recommend `deny`).
 2. Evaluate all rules; collect verdicts. **Most restrictive wins**
    (`deny` > `needs_approval` > `allow`).
-3. Check balance ≥ amount; insufficient funds → `deny` (distinct reason).
-4. If any `approval` rule triggers and nothing denies → `needs_approval`.
-5. Emit the decision + `firedRules` to the audit log **always**.
+3. Check the **learning boundary**: if the quote requires exhaust rights the policy does
+   not make grantable → `deny`. Enforced outside the rule loop, so it holds even for a
+   policy carrying no `exhaust_rights` rule at all.
+4. Check balance ≥ amount; insufficient funds → `deny` (distinct reason).
+5. If any `approval` rule triggers and nothing denies → `needs_approval`.
+6. Emit the decision + `firedRules` to the audit log **always**.
 
 ## Approval flow
 
